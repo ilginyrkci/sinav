@@ -8,10 +8,12 @@ import QuizArena from './components/QuizArena';
 import TopicSummaries from './components/TopicSummaries';
 import ProfileBadges from './components/ProfileBadges';
 
+import staticData from './data/data.json';
+
 const API_BASE = "http://127.0.0.1:8000/api";
 
 export default function App() {
-  const [subjects, setSubjects] = useState([]);
+  const [subjects, setSubjects] = useState(staticData.subjects || []);
   const [activeTab, setActiveTab] = useState('home'); // 'home', 'subject_detail', 'quiz', 'summaries', 'profile'
   
   // Seçili Ders ve Test
@@ -29,40 +31,58 @@ export default function App() {
   const [timer, setTimer] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
 
-  // İlerleme
-  const [progress, setProgress] = useState({
-    total_points: 100,
-    solved_count: 0,
-    correct_count: 0,
-    wrong_count: 0,
-    badges: ["6. Sınıf Kaşifi 🚀"],
-    completed_tests: {},
-    history: []
+  // İlerleme (Local storage destekli)
+  const [progress, setProgress] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ortaokul_progress');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.warn("localStorage error", e);
+    }
+    return {
+      total_points: 100,
+      solved_count: 0,
+      correct_count: 0,
+      wrong_count: 0,
+      badges: ["6. Sınıf Kaşifi 🚀"],
+      completed_tests: {},
+      history: []
+    };
   });
 
   // Konu Özetleri
-  const [summaries, setSummaries] = useState([]);
+  const [summaries, setSummaries] = useState(staticData.summaries || []);
 
   useEffect(() => {
+    // API varsa API'den çek, yoksa static veriyi kullan (Vercel vb. ortamlarda kusursuz çalışır)
     fetch(`${API_BASE}/subjects`)
       .then(r => r.json())
-      .then(data => setSubjects(data))
-      .catch(console.error);
+      .then(data => {
+        if (data && data.length > 0) setSubjects(data);
+      })
+      .catch(() => {
+        // Backend yoksa staticData zaten devrede
+        setSubjects(staticData.subjects || []);
+      });
 
     fetch(`${API_BASE}/summaries`)
       .then(r => r.json())
-      .then(data => setSummaries(data))
-      .catch(console.error);
-
-    loadProgress();
+      .then(data => {
+        if (data && data.length > 0) setSummaries(data);
+      })
+      .catch(() => {
+        setSummaries(staticData.summaries || []);
+      });
   }, []);
 
-  const loadProgress = () => {
-    fetch(`${API_BASE}/progress`)
-      .then(r => r.json())
-      .then(data => setProgress(data))
-      .catch(console.error);
-  };
+  // Progress değiştikçe localStorage'a kaydet
+  useEffect(() => {
+    try {
+      localStorage.setItem('ortaokul_progress', JSON.stringify(progress));
+    } catch (e) {
+      console.warn(e);
+    }
+  }, [progress]);
 
   // Zamanlayıcı
   useEffect(() => {
@@ -80,13 +100,42 @@ export default function App() {
   // Ders Seçimi
   const handleSelectSubject = (subj) => {
     setSelectedSubject(subj);
+    
+    // API dene, başarısızsa yerel veriden filtrele
     fetch(`${API_BASE}/tests?subject=${encodeURIComponent(subj.name)}`)
       .then(r => r.json())
       .then(data => {
         setTestList(data);
         setActiveTab('subject_detail');
       })
-      .catch(console.error);
+      .catch(() => {
+        const allQ = (staticData.questions || []).filter(
+          q => q.subject.toLowerCase() === subj.name.toLowerCase()
+        );
+        const testNames = {
+          1: { title: "Test 1: Temel Seviye", diff: "Kolay", icon: "🌱" },
+          2: { title: "Test 2: Kavrama Testi", diff: "Kolay-Orta", icon: "🌿" },
+          3: { title: "Test 3: Geliştirme Testi", diff: "Orta", icon: "🌳" },
+          4: { title: "Test 4: Yeni Nesil Alıştırma", diff: "Orta-Zor", icon: "⚡" },
+          5: { title: "Test 5: Sınav Provası (Zor)", diff: "Zor", icon: "🏆" }
+        };
+        const tests = [];
+        for (let t_no = 1; t_no <= 5; t_no++) {
+          const tQ = allQ.filter(q => q.test_no === t_no);
+          const meta = testNames[t_no] || { title: `Test ${t_no}`, diff: "Orta", icon: "📝" };
+          const topic = tQ[0]?.topic || subj.topics[t_no - 1] || "Genel Konu";
+          tests.push({
+            test_no: t_no,
+            title: meta.title,
+            topic: topic,
+            difficulty: meta.diff,
+            icon: meta.icon,
+            count: tQ.length || 20
+          });
+        }
+        setTestList(tests);
+        setActiveTab('subject_detail');
+      });
   };
 
   // Test Başlatma
@@ -103,10 +152,24 @@ export default function App() {
     fetch(`${API_BASE}/questions?subject=${encodeURIComponent(selectedSubject.name)}&test_no=${testItem.test_no}`)
       .then(r => r.json())
       .then(data => {
-        setQuestions(data);
-        setActiveTab('quiz');
+        if (data && data.length > 0) {
+          setQuestions(data);
+          setActiveTab('quiz');
+        } else {
+          loadStaticQuestions(testItem);
+        }
       })
-      .catch(console.error);
+      .catch(() => {
+        loadStaticQuestions(testItem);
+      });
+  };
+
+  const loadStaticQuestions = (testItem) => {
+    const filtered = (staticData.questions || []).filter(
+      q => q.subject.toLowerCase() === selectedSubject.name.toLowerCase() && q.test_no === testItem.test_no
+    );
+    setQuestions(filtered);
+    setActiveTab('quiz');
   };
 
   const handleSelectOption = (optIdx) => {
@@ -151,6 +214,7 @@ export default function App() {
     });
 
     const score = Math.round((correct / (questions.length || 1)) * 100);
+    const earned_points = correct * 10;
 
     if (score >= 70) {
       confetti({
@@ -160,6 +224,56 @@ export default function App() {
       });
     }
 
+    // İlerlemeyi güncelle (Local + API)
+    setProgress(prev => {
+      const newSolved = prev.solved_count + questions.length;
+      const newCorrect = prev.correct_count + correct;
+      const newWrong = prev.wrong_count + wrong;
+      const newPoints = prev.total_points + earned_points;
+
+      const badges = new Set(prev.badges || []);
+      if (newSolved >= 20) badges.add("İlk 20'lik Barajı Aşıldı! 🎯");
+      if (newSolved >= 100) badges.add("100 Soru Şampiyonu 💯");
+      if (newSolved >= 300) badges.add("6. Sınıf Profesörü 🎓");
+      if (correct === questions.length && questions.length >= 20) badges.add("Kusursuz 20/20 Tam Puan! ⭐");
+      if (selectedSubject.name === "Matematik" && correct >= 15) badges.add("Matematik Ustası 📐");
+      if (selectedSubject.name === "Bilim Uygulamaları" && correct >= 15) badges.add("Genç Mucit 🚀");
+
+      const completed = { ...(prev.completed_tests || {}) };
+      if (selectedTest?.test_no) {
+        completed[`${selectedSubject.name}_${selectedTest.test_no}`] = {
+          score,
+          correct,
+          date: "Bugün"
+        };
+      }
+
+      const history = [...(prev.history || [])];
+      history.push({
+        grade: 6,
+        subject: selectedSubject.name,
+        test_no: selectedTest?.test_no || 1,
+        correct,
+        wrong,
+        empty,
+        score,
+        earned_points,
+        time: timer
+      });
+
+      return {
+        ...prev,
+        total_points: newPoints,
+        solved_count: newSolved,
+        correct_count: newCorrect,
+        wrong_count: newWrong,
+        badges: Array.from(badges),
+        completed_tests: completed,
+        history
+      };
+    });
+
+    // Varsa Backend'e de gönder
     fetch(`${API_BASE}/progress/submit-exam`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -174,12 +288,9 @@ export default function App() {
         score,
         time_spent_seconds: timer
       })
-    })
-      .then(r => r.json())
-      .then(data => {
-        if (data.progress) setProgress(data.progress);
-      })
-      .catch(console.error);
+    }).catch(() => {
+      // Offline modda sessizce devam
+    });
   };
 
   const formatTime = (secs) => {
